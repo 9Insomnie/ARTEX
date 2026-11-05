@@ -87,6 +87,8 @@ import type {
   TaskCategory,
   TaskConstraint,
   TaskGoal,
+  GoalAcceptanceSpec,
+  GoalVerification,
   TaskLLMResolutions,
   TaskNode,
   TaskScopeRow,
@@ -392,6 +394,13 @@ export const api = {
     patch<TaskGoal>(`/tasks/${id}/goals/${goalId}`, { text, vulnclass: vulnclass ?? "" }),
   // 人工删除目标（硬删除）：通知 planner，删除不复活任务。
   deleteGoal: (id: string, goalId: string) => del<{ ok: boolean }>(`/tasks/${id}/goals/${goalId}`),
+  setGoalAcceptance: (id: string, goalId: string, spec: GoalAcceptanceSpec) =>
+    http<TaskGoal>(`/tasks/${id}/goals/${goalId}/acceptance`, { method: "PUT", body: JSON.stringify(spec) }),
+  goalVerifications: (id: string) => get<{ items: GoalVerification[] }>(`/tasks/${id}/goal-verifications`).then((r) => arr(r.items)),
+  submitGoalVerification: (id: string, goalId: string, evidenceId: number, reason: string) =>
+    post<GoalVerification>(`/tasks/${id}/goals/${goalId}/verification`, { evidence_id: evidenceId, reason }),
+  reviewGoalVerification: (id: string, verificationId: string, decision: "accept" | "reject", note: string) =>
+    post<GoalVerification>(`/tasks/${id}/goal-verifications/${verificationId}/review`, { decision, note }),
 
   // ---- 操作约束管理（总览）----
   // 本任务全部操作约束（allow/deny）。

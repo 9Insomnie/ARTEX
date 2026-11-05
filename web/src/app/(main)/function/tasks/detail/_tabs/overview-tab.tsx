@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
+import { GoalAcceptancePanel } from "@/components/goal-acceptance-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -572,6 +573,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           )}
         </CardContent>
       </Card>
+      <GoalAcceptancePanel taskId={taskId} goals={goals} onChange={loadGoals} />
       {/* 操作约束管理：allow=允许 / deny=禁止。约束会在下一轮规划时注入 planner/worker 的系统
           提示以框定探索边界（注入范围可在 系统设置 里按 planner/worker 开关）。改动不即时打断，
           下一轮规划自然读到。 */}

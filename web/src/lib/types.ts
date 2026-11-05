@@ -448,12 +448,41 @@ export interface ExplorationNodeQuery {
 
 // 目标管理卡片用的目标(后端已把 payload 拆成 text/vulnclass)。
 export interface TaskGoal {
+	acceptance_spec?: GoalAcceptanceSpec;
+	acceptance_version?: number;
+	acceptance_status?: string;
   id: string;
   text: string;
   vulnclass?: string;
   state: string; // GoalState
   origin?: string;
   ts: string;
+}
+
+export interface GoalAcceptanceSpec {
+  type: "manual" | "confirmed_findings" | "artifact";
+  min_count?: number;
+  vulnclass?: string;
+  path?: string;
+  format?: "text" | "json" | "markdown";
+  sha256?: string;
+  required_headings?: string[];
+}
+export interface GoalVerification {
+  id: string;
+  goal_id: string;
+  evidence_id: string;
+  goal_version: number;
+  status: string;
+  reason: string;
+  note: string;
+  submitted_by: string;
+  reviewed_by: string;
+  review_note: string;
+  snapshot: Record<string, unknown>;
+  created_at: string;
+  decided_at?: string;
+  all_met: boolean;
 }
 
 // 约束管理卡片用的操作约束(allow=允许 / deny=禁止)。
