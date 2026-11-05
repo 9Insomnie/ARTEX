@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -274,19 +275,38 @@ func (s *ExplorationStore) SetNodeState(id int64, state string) error {
 // scoped to kind='goal' so it can never mutate an intent/fact by id. Returns an
 // error if no such goal exists in this exploration.
 func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) error {
-	payload := map[string]any{"text": text}
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	raw, _, err := s.lockGoal(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return err
+	}
+	_, version, _ := GoalAcceptance(raw)
+	payload["text"], payload["acceptance_version"], payload["acceptance_status"] = text, version+1, "not_submitted"
+	delete(payload, "vulnclass")
 	if vulnclass != "" {
 		payload["vulnclass"] = vulnclass
 	}
-	raw, _ := json.Marshal(payload)
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
+	updated, _ := json.Marshal(payload)
+	res, err := tx.ExecContext(ctx, `UPDATE exploration_nodes SET payload=$1,state='open',completed_at=NULL,content_version=content_version+1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(updated), id, s.expID)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("目标不存在")
 	}
-	return nil
+	if err := staleGoalVerifications(ctx, tx, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeleteGoal hard-deletes a goal node; scoped to kind='goal' so it can never drop

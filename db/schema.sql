@@ -239,6 +239,28 @@ BEGIN
     END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_expnodes_part     ON exploration_nodes(exploration_id, kind);
+-- Acceptance decisions are separate from model claims. Natural-language goals
+-- default to manual review; user-owned rules/version/status live in goal payload.
+CREATE TABLE IF NOT EXISTS goal_verifications (
+    id BIGSERIAL PRIMARY KEY,
+    exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
+    goal_id BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
+    evidence_id BIGINT NOT NULL,
+    goal_version INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('needs_review','needs_more_evidence','accepted','rejected','stale')),
+    reason TEXT NOT NULL,
+    note TEXT NOT NULL,
+    submitted_by TEXT NOT NULL,
+    reviewed_by TEXT NOT NULL DEFAULT '',
+    review_note TEXT NOT NULL DEFAULT '',
+    snapshot JSONB NOT NULL,
+    fingerprint TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    decided_at TIMESTAMPTZ,
+    UNIQUE(goal_id,fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_goal_verifications_task ON goal_verifications(exploration_id,id DESC);
+CREATE INDEX IF NOT EXISTS idx_goal_verifications_evidence ON goal_verifications(evidence_id);
 CREATE INDEX IF NOT EXISTS idx_expnodes_frontier ON exploration_nodes(exploration_id, priority DESC)
     WHERE kind='intent' AND state='open';
 DROP TRIGGER IF EXISTS trg_expnodes_upd ON exploration_nodes;
@@ -1384,3 +1406,54 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
     ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
     ON notification_deliveries(channel_id, id DESC);
+
+-- Evidence changes invalidate dependent decisions, including already accepted
+-- goals. Keep the original snapshot and reviewer attribution for the audit trail.
+CREATE OR REPLACE FUNCTION invalidate_goal_acceptance(evidence_node BIGINT, finding_record BIGINT)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE affected BIGINT[];
+BEGIN
+    WITH changed AS (
+        UPDATE goal_verifications v SET status='stale',note='引用证据已修改、撤销或删除，必须重新验收'
+        WHERE v.status IN ('accepted','needs_review')
+          AND (v.evidence_id=evidence_node OR
+            (evidence_node IS NOT NULL AND v.snapshot->'confirmed_findings' @> jsonb_build_array(jsonb_build_object('node_id',evidence_node))) OR
+            (finding_record IS NOT NULL AND v.snapshot->'confirmed_findings' @> jsonb_build_array(jsonb_build_object('finding_id',finding_record))))
+          AND NOT EXISTS (SELECT 1 FROM tasks t JOIN task_archives a ON a.task_id=t.id
+              WHERE t.exploration_id=v.exploration_id AND a.state IN ('archiving','restoring','deleting'))
+        RETURNING v.goal_id
+    ) SELECT array_agg(goal_id) INTO affected FROM changed;
+    IF affected IS NULL THEN RETURN; END IF;
+    PERFORM id FROM explorations WHERE id IN (SELECT exploration_id FROM exploration_nodes WHERE id=ANY(affected)) ORDER BY id FOR UPDATE;
+    UPDATE exploration_nodes SET state='open',completed_at=NULL,
+        payload=jsonb_set(payload,'{acceptance_status}','"stale"'::jsonb),content_version=content_version+1
+        WHERE id=ANY(affected) AND kind='goal';
+    DELETE FROM exploration_edges WHERE dst_id=ANY(affected) AND rel='proves';
+    -- A completed task becomes paused for review; no automatic probing resumes.
+    UPDATE tasks SET status='running',paused=true,completed_at=NULL
+        WHERE status='done' AND exploration_id IN (SELECT exploration_id FROM exploration_nodes WHERE id=ANY(affected));
+END $$;
+CREATE OR REPLACE FUNCTION invalidate_changed_goal_node() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.kind NOT IN ('fact','finding') THEN RETURN NULL; END IF;
+    IF TG_OP='UPDATE' THEN
+        IF OLD.payload IS NOT DISTINCT FROM NEW.payload AND OLD.state IS NOT DISTINCT FROM NEW.state THEN RETURN NULL; END IF;
+    END IF;
+    PERFORM invalidate_goal_acceptance(OLD.id,NULL);
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS trg_goal_evidence_changed ON exploration_nodes;
+CREATE TRIGGER trg_goal_evidence_changed AFTER UPDATE OF payload,state OR DELETE ON exploration_nodes
+    FOR EACH ROW EXECUTE FUNCTION invalidate_changed_goal_node();
+CREATE OR REPLACE FUNCTION invalidate_changed_goal_finding() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='UPDATE' THEN
+        IF OLD.status IS NOT DISTINCT FROM NEW.status AND OLD.evidence IS NOT DISTINCT FROM NEW.evidence
+            AND OLD.vulnclass IS NOT DISTINCT FROM NEW.vulnclass AND OLD.evidence_version IS NOT DISTINCT FROM NEW.evidence_version THEN RETURN NULL; END IF;
+    END IF;
+    PERFORM invalidate_goal_acceptance(OLD.node_id,OLD.id);
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS trg_goal_finding_changed ON findings;
+CREATE TRIGGER trg_goal_finding_changed AFTER UPDATE OF status,evidence,vulnclass,evidence_version OR DELETE ON findings
+    FOR EACH ROW EXECUTE FUNCTION invalidate_changed_goal_finding();

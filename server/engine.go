@@ -847,7 +847,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			if active, err := t.Store.HasActiveIntent(); err == nil && !active {
 				// frontier 抽干且无在跑意图 → 收尾。用 Guarded 版做 CAS，避免踩到并发的
 				// pause/delete/超时收尾的状态转换。
-				if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil {
+				if won, err := e.m.completeIdleTask(ctx, t); err != nil {
 					log.Printf("[goalless] task %s 收尾落 done 失败: %v", t.ID, err)
 				} else if won {
 					e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
@@ -855,6 +855,12 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 				}
 			}
 			return // goalless 分支永不进入 planner.Plan
+		}
+		if actionable, err := t.Store.HasActionableGoal(); err != nil {
+			log.Printf("[planner] task %s 读取验收状态失败: %v", t.ID, err)
+			return
+		} else if !actionable {
+			return // all remaining goals await human review; no paid heartbeat round
 		}
 		if !e.beginTaskOperation(t.ID) {
 			return
@@ -885,13 +891,16 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		case met:
 			log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
 			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
-			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
+			completed, err := e.m.completeAcceptedTask(ectx, t)
+			if err != nil {
 				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
 			}
 			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
 			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
 			// 归为 stopped(而非 blocked)。
-			e.cancelExec(t.ID, agent.AbortGoalMet)
+			if completed {
+				e.cancelExec(t.ID, agent.AbortGoalMet)
+			}
 		default:
 			log.Printf("[planner] task %s 规划完成", t.ID)
 		}
@@ -1218,7 +1227,7 @@ func taskExecutionPaused(cause error) bool {
 	}
 	switch abort.Code {
 	case "paused_by_user", "paused_by_orchestrator", "paused_on_reload", "paused_race_guard",
-		"queued_for_admission", "llm_unavailable_queued", "task_deleted":
+		"queued_for_admission", "llm_unavailable_queued", "task_deleted", "goal_evidence_changed":
 		return true
 	default:
 		return false

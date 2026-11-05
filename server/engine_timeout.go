@@ -213,7 +213,13 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 	// 守卫(SetTaskStatusGuarded)会拒绝覆盖,保留 completed 语义。
 	status := "timeout"
 	if met {
-		status = "done"
+		completed, err := e.m.completeAcceptedTask(ctx, t)
+		if err != nil {
+			log.Printf("[deadline] task %s 验收完成状态写入失败: %v", t.ID, err)
+		}
+		if completed {
+			return
+		}
 	}
 	won, err := e.m.SetTaskStatusGuarded(t.ID, status)
 	switch {
@@ -231,6 +237,9 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 // LLM to be ready (bounded by ctx) so a completable task isn't mis-judged timeout.
 func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 	if e.IsDeleting(t.ID) {
+		return false
+	}
+	if actionable, err := t.Store.HasActionableGoal(); err != nil || !actionable {
 		return false
 	}
 	planner, _ := e.snapshotFor(t)

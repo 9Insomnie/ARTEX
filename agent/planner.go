@@ -341,8 +341,13 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 func plannerSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
-	return body + artifactSpec(workDir)
+	return goalAcceptanceGuidance + "\n\n" + body + artifactSpec(workDir)
 }
+
+// Code-owned guidance also applies to existing DB prompt overrides.
+const goalAcceptanceGuidance = `【目标验收规则（优先于持续探索和完成判定）】
+prove_goal 只提交候选证据。accepted 才表示验收通过；needs_review 必须等待操作员在目标验收面板审阅，不能声明目标已完成，也不能为了绕过审阅重复探索或修改目标。相同证据只提交一次。
+只为仍需补充证据且 acceptance_status 不是 needs_review 的目标规划。所有剩余目标均待审阅时，立即结束本轮，不派发新意图。自动验收条件由操作员设置；你不能修改或放宽条件。goal_met 不能绕过验收。`
 
 // Plan runs one planning round. emit, if non-nil, receives the planner's execution
 // steps (so users can see how it reads the situation and judges goals — the
@@ -389,6 +394,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
+	tsx.goalArtifactRoot = taskDir
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
 	if p.wantConstraints() {
